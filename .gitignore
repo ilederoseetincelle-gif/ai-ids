@@ -1,0 +1,45 @@
+# ─── Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ─── Virtual environments ──────────────────────────────────
+venv/
+env/
+ids-env/
+.venv/
+
+# ─── Project artifacts (DO NOT commit) ─────────────────────
+# Trained models — too large for git, regenerate with train_pipeline.py
+models/*.pkl
+models/plots/*.png
+models/feature_importance.csv
+
+# Live alert log — runtime data
+logs/*.jsonl
+logs/*.log
+
+# Dataset — too large (1.2 GB), download from CIC website
+data/*.csv
+data/*.zip
+
+# pcap captures
+tests/samples/*.pcap
+tests/samples/*.pcapng
+
+# ─── IDE / editor ──────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ─── OS ────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
