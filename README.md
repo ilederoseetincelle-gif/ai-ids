@@ -21,15 +21,16 @@ signature match.
 │                        AI-IDS Pipeline                       │
 └──────────────────────────────────────────────────────────────┘
 
-  Network          Capture           Feature             ML
-  Traffic    ───►  Layer      ───►   Extraction   ───►  Inference
-  (Kali           (Scapy /            (20 flow            (RF
-   attacks)        Zeek)              features)            model)
+  Network          Capture           Feature           ML Inference
+  Traffic    ───►  Layer      ───►   Extraction   ───► (XGBoost +
+  (Kali           (Scapy /            (20 flow           Isolation
+   attacks)        Zeek)              features)          Forest + SHAP)
                                                              │
                                                              ▼
    ┌────────────────────────────────────────────────────────────┐
-   │              Alert Log + Streamlit Dashboard                │
-   │  (real-time visualization of detected attacks by severity)  │
+   │   Alert Log + Streamlit Dashboard  +  optional IPS layer    │
+   │  (real-time visualization · auto-block malicious IPs via    │
+   │   iptables when --ips is enabled)                           │
    └────────────────────────────────────────────────────────────┘
 ```
 
@@ -60,7 +61,7 @@ python run_tests.py   # or: pytest tests/ -v
 ```
 
 This runs the entire training pipeline on synthetic data and verifies all
-33 unit tests pass. Useful to confirm your environment is correct **before**
+56 unit tests pass. Useful to confirm your environment is correct **before**
 downloading the 1.2 GB dataset.
 
 ### 3. Download the CICIDS2017 dataset
@@ -88,8 +89,15 @@ python train_pipeline.py
 ```
 
 This loads the dataset (~2.7M flows after cleaning), applies preprocessing,
-trains the Random Forest, and generates evaluation plots. Expected runtime:
-**5–15 minutes** depending on your CPU.
+trains **XGBoost** (the default — faster and more accurate than Random Forest),
+fits the Isolation Forest anomaly detector on benign traffic, and generates
+evaluation plots. Expected runtime: **5–15 minutes** depending on your CPU.
+
+To train Random Forest instead:
+
+```bash
+python train_pipeline.py --model rf
+```
 
 For faster iteration during development:
 
@@ -100,7 +108,7 @@ python train_pipeline.py --sample 0.1   # use 10% of the data
 For final tuning before the defense:
 
 ```bash
-python train_pipeline.py --tune --compare   # GridSearchCV + XGBoost + MLP (1–3 hrs)
+python train_pipeline.py --tune --compare   # GridSearchCV + model comparison (1–3 hrs)
 ```
 
 ### 5. Run the demo
@@ -122,6 +130,20 @@ sudo python main.py --mode live --interface eth0
 
 Replace `eth0` with your network interface name (find it with `ip a` on Linux).
 
+### 7. Run with active prevention (IPS mode)
+
+```bash
+sudo python main.py --mode live --interface eth0 --ips           # enforce blocks
+sudo python main.py --mode live --interface eth0 --ips-dry-run   # log intended blocks only
+```
+
+With `--ips`, the system goes beyond detection: a conservative policy engine
+decides which alerts warrant a response, and confirmed malicious IPs are
+auto-blocked via `iptables` (in a dedicated `AI_IDS_BLOCK` chain) for a
+configurable duration. Whitelisted IPs in `config/whitelist.txt` are **never**
+blocked. Use `--ips-dry-run` first to preview actions without touching the
+firewall.
+
 ---
 
 ## Project Structure
@@ -141,11 +163,18 @@ ai-ids/
 │   │   ├── loader.py          # CICIDS2017 loader, label encoder, splitter
 │   │   └── features.py        # Feature selector, scaler, SMOTE handler
 │   ├── training/
-│   │   ├── train.py           # Random Forest, XGBoost, MLP, GridSearchCV
+│   │   ├── train.py           # XGBoost (default), Random Forest, MLP, GridSearchCV
 │   │   └── evaluate.py        # Metrics, confusion matrix, ROC curves
 │   ├── detection/
 │   │   ├── extractor.py       # Live flow extractor (CICIDS-compatible)
-│   │   └── engine.py          # Inference + alert generation
+│   │   ├── engine.py          # Inference + alert generation
+│   │   └── anomaly.py         # Isolation Forest (zero-day / novel traffic)
+│   ├── explainability/
+│   │   └── shap_explainer.py  # Top-5 SHAP contributions per alert
+│   ├── prevention/            # IPS layer (optional, --ips)
+│   │   ├── firewall.py        # iptables wrapper (AI_IDS_BLOCK chain)
+│   │   ├── policy.py          # Response policy engine (block/log/escalate)
+│   │   └── responder.py       # Orchestrates detection → response + auto-unblock
 │   └── dashboard/
 │       └── app.py             # Streamlit real-time dashboard
 │
@@ -165,29 +194,42 @@ ai-ids/
 
 ## Key Design Choices
 
-### Why Random Forest and not Deep Learning?
+### Why Gradient-Boosted Trees and not Deep Learning?
 
-Three concrete reasons:
+The default model is **XGBoost** (Random Forest is available via `--model rf`).
+Three concrete reasons for tree ensembles over deep nets here:
 
 1. **Better on tabular data.** Network flow features are tabular, not images
    or text where deep learning excels. Tree ensembles consistently outperform
-   deep nets on this kind of data.
-2. **Interpretable.** `feature_importances_` shows exactly which network
+   deep nets on this kind of data — and XGBoost edges out Random Forest on
+   both accuracy and training speed (via the `hist` method).
+2. **Interpretable.** Feature importances plus per-alert **SHAP contributions**
+   (`src/explainability/shap_explainer.py`) show exactly which network
    characteristics triggered a detection — critical for explaining decisions
    to a SOC analyst (or a jury).
 3. **Fast inference.** Sub-millisecond predictions per flow, no GPU required.
    This is essential for a real-time system processing thousands of flows
    per second.
 
+### Catching Novel Attacks — Anomaly Detection
+
+A supervised classifier can only recognize attack patterns it was trained on.
+To flag traffic that looks like *nothing* in the training data, an
+**Isolation Forest** (`src/detection/anomaly.py`) is fit on benign-only
+traffic and runs alongside the classifier. When the supervised model predicts
+BENIGN but the anomaly score is suspicious, the flow is raised as
+`Unknown / Anomaly` — a lightweight zero-day safety net.
+
 ### How Class Imbalance Is Handled
 
 CICIDS2017 is severely imbalanced — BENIGN traffic dominates (~80%) while
 Heartbleed has only ~11 samples total. Two mechanisms:
 
-1. `class_weight="balanced"` in the Random Forest — weights each class
-   inversely proportional to its frequency.
+1. **Class weighting** — Random Forest uses `class_weight="balanced"`; XGBoost
+   weights samples inversely proportional to class frequency.
 2. **SMOTE** (Synthetic Minority Over-sampling Technique) on the training
-   set only, generating synthetic minority samples in feature space.
+   set only, generating synthetic minority samples in feature space
+   (`k_neighbors=3`, since Heartbleed has only ~11 samples).
 
 ### How False Positives Are Controlled
 
@@ -216,10 +258,12 @@ Coverage:
 | Module | Tests | Covers |
 |---|---|---|
 | `test_preprocessing.py` | 14 | Loading, cleaning, label encoding, SMOTE, scaling |
-| `test_training.py` | 9 | RF training, save/load, evaluation, plotting |
-| `test_detection.py` | 10 | Flow extraction, inference, alerting, severity |
+| `test_detection.py` | 15 | Flow extraction, inference, alerting, severity |
+| `test_anomaly.py` | 10 | Isolation Forest fit, scoring, novel-traffic flagging |
+| `test_training.py` | 9 | XGBoost/RF training, save/load, evaluation, plotting |
+| `test_explainability.py` | 8 | SHAP explainer, top-5 contributions, graceful skip |
 
-**All 33 tests pass on synthetic data with no real dataset required.**
+**All 56 tests pass on synthetic data with no real dataset required.**
 
 ---
 
@@ -275,7 +319,7 @@ You should see real-time alerts in the terminal and on the dashboard.
 The day before:
 
 - [ ] Run `python train_pipeline.py --tune --compare` overnight for the best results
-- [ ] Run `python run_tests.py` — confirm all 33 tests pass
+- [ ] Run `python run_tests.py` — confirm all 56 tests pass
 - [ ] Run `python main.py --mode demo --clear-log` and watch the full demo
 - [ ] Record a screen capture of the demo as a video backup (`OBS Studio` is free)
 - [ ] Print 2 copies of the report
@@ -304,9 +348,11 @@ This is a Bachelor's project — be honest about what it is and isn't:
 - **No encrypted traffic analysis.** The model uses flow-level features which
   work on encrypted traffic, but content-based features would require
   deep packet inspection.
-- **Supervised model.** Cannot detect truly novel zero-day attacks — adding
-  an Isolation Forest or Autoencoder layer would address this (good "future
-  work" point for the report).
+- **Supervised model + anomaly fallback.** The XGBoost classifier only
+  recognizes attack patterns it was trained on. An Isolation Forest anomaly
+  detector partially mitigates this by flagging novel benign-looking traffic
+  as `Unknown / Anomaly`, but a deep autoencoder trained on richer features
+  would push zero-day coverage further (future work).
 
 ---
 
