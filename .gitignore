@@ -43,3 +43,7 @@ tests/samples/*.pcapng
 # ─── OS ────────────────────────────────────────────────────
 Thumbs.db
 desktop.ini
+
+# ─── Local agent tooling (not part of the project) ────────
+.claude/
+.claude-flow/

@@ -1,0 +1,22 @@
+# AI-IDS IPS Whitelist
+# IPs listed here will NEVER be blocked, regardless of detection.
+# One IP per line. Lines starting with # are comments.
+#
+# CRITICAL: Add your own development machine, default gateway,
+# and any monitoring/admin systems here BEFORE enabling IPS mode.
+# Blocking your gateway will cut you off from the network!
+
+# Localhost
+127.0.0.1
+
+# Lab virtual network (host-only) — adjust to your subnet
+192.168.56.1
+192.168.56.30
+
+# Default gateway (typical home router)
+192.168.1.1
+192.168.0.1
+192.168.1.254
+
+# Add your laptop's static IP if applicable
+# 192.168.1.100

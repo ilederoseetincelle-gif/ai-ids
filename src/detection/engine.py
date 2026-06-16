@@ -13,6 +13,7 @@ Alert pipeline per flow:
   4. Apply filters: benign-class filter → confidence threshold
   5. If alert raised: compute SHAP contributions (if SHAP available)
   6. Assign severity, log to JSONL, print to console
+  7. If IPS enabled: forward alert to Responder (block / log / escalate)
 
 Alerts are persisted as JSON lines in config.ALERT_LOG_FILE so the
 dashboard can read them asynchronously.
@@ -31,6 +32,7 @@ import numpy as np
 
 import config
 from src.detection.extractor import FlowExtractor
+from src.prevention import Firewall, Responder, ResponsePolicy
 
 try:
     from colorama import Fore, Style, init as colorama_init
@@ -60,6 +62,8 @@ class DetectionEngine:
         alert_log: Path = None,
         anomaly_path: Path = None,
         enable_shap: bool = True,
+        enable_ips: bool = False,
+        ips_dry_run: bool = False,
     ):
         """
         Args:
@@ -69,6 +73,8 @@ class DetectionEngine:
             anomaly_path: Path to anomaly model. If None uses config.ANOMALY_MODEL_FILE.
                           Missing file is silently ignored (anomaly check disabled).
             enable_shap:  If True (default), load SHAP explainer when shap is installed.
+            enable_ips:   If True, enable the IPS responder (block malicious IPs).
+            ips_dry_run:  If True, log intended blocks but do not modify iptables.
         """
         if scaler_path is None:
             scaler_path = config.SCALER_FILE
@@ -143,6 +149,16 @@ class DetectionEngine:
                       "Run: pip install shap>=0.47")
             except Exception as e:
                 print(f"[warn] Could not load SHAP explainer: {e}")
+
+        # ── IPS responder (optional) ──────────────────────────────────────────
+        self._responder: Optional[object] = None
+        if enable_ips:
+            fw = Firewall(dry_run=ips_dry_run, audit_log=config.IPS_AUDIT_LOG)
+            policy = ResponsePolicy()
+            n_wl = policy.load_whitelist(str(config.IPS_WHITELIST))
+            self._responder = Responder(firewall=fw, policy=policy)
+            mode = "DRY-RUN" if ips_dry_run else "ACTIVE"
+            print(f"[IPS] Enabled — mode={mode}, whitelist={n_wl} IPs")
 
         # Statistics
         self.flows_seen    = 0
@@ -267,7 +283,12 @@ class DetectionEngine:
     # ── Alert logging ─────────────────────────────────────────────────────────
 
     def log_alert(self, alert: dict) -> None:
-        """Append an alert to the JSONL log and print a color-coded summary."""
+        """Append an alert to the JSONL log, print a summary, and trigger IPS."""
+        if self._responder is not None:
+            decision = self._responder.handle_alert(alert)
+            alert["ips_action"] = decision.action
+            alert["ips_reason"] = decision.reason
+
         with self._lock:
             with self.alert_log.open("a") as f:
                 f.write(json.dumps(alert) + "\n")
@@ -369,6 +390,12 @@ class DetectionEngine:
         count = self.extractor.flush_all()
         print(f"Finalized {count} flows from replay.")
         self._print_stats()
+
+    def shutdown(self) -> None:
+        """Stop the IPS unblock daemon cleanly. Call before program exit."""
+        self._running = False
+        if self._responder is not None:
+            self._responder.shutdown()
 
     def _print_stats(self) -> None:
         print(f"\n{'='*60}")

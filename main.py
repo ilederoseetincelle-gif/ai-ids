@@ -63,6 +63,14 @@ def parse_args() -> argparse.Namespace:
         "--clear-log", action="store_true",
         help="Clear the alert log before starting.",
     )
+    parser.add_argument(
+        "--ips", action="store_true",
+        help="Enable Intrusion Prevention — auto-block malicious IPs via iptables.",
+    )
+    parser.add_argument(
+        "--ips-dry-run", action="store_true",
+        help="IPS dry-run: log intended blocks but do not modify iptables.",
+    )
     return parser.parse_args()
 
 
@@ -74,17 +82,20 @@ def clear_alert_log() -> None:
     print(f"Cleared alert log: {config.ALERT_LOG_FILE}")
 
 
-def run_live(interface: str) -> int:
+def run_live(interface: str, enable_ips: bool = False, ips_dry_run: bool = False) -> int:
     """Run the detection engine on a live interface."""
     from src.detection.engine import DetectionEngine
 
     try:
-        engine = DetectionEngine()
+        engine = DetectionEngine(enable_ips=enable_ips, ips_dry_run=ips_dry_run)
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
         return 1
 
-    engine.start_live(interface)
+    try:
+        engine.start_live(interface)
+    finally:
+        engine.shutdown()
     return 0
 
 
@@ -176,7 +187,9 @@ def main() -> int:
         clear_alert_log()
 
     if args.mode == "live":
-        return run_live(args.interface)
+        return run_live(args.interface,
+                        enable_ips=args.ips,
+                        ips_dry_run=args.ips_dry_run)
     elif args.mode == "replay":
         return run_replay(args.pcap)
     elif args.mode == "dashboard":

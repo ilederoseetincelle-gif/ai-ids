@@ -409,6 +409,127 @@ styled = (
 st.dataframe(styled, use_container_width=True, hide_index=True, height=400)
 
 
+# ─── IPS PANEL ────────────────────────────────────────────────────────────────
+def _render_ips_panel() -> None:
+    """Render the IPS activity panel (only shown when ips_audit.jsonl exists)."""
+    audit_path = Path(config.IPS_AUDIT_LOG)
+    if not audit_path.exists():
+        return
+
+    st.markdown("<hr style='margin:18px 0;border-color:#243141;'>", unsafe_allow_html=True)
+    st.markdown("#### 🛡️ Intrusion Prevention (IPS)")
+
+    records = []
+    try:
+        with audit_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    except Exception:
+        st.warning("Could not read IPS audit log.")
+        return
+
+    if not records:
+        st.info("No IPS actions yet.")
+        return
+
+    ips_df = pd.DataFrame(records)
+    ips_df["timestamp"] = pd.to_datetime(ips_df["timestamp"], errors="coerce", utc=True)
+
+    total_blocks   = int(ips_df["action"].isin(["BLOCK", "BLOCK_DRYRUN"]).sum())
+    total_unblocks = int(ips_df["action"].isin(["UNBLOCK", "UNBLOCK_DRYRUN"]).sum())
+    active_blocks  = total_blocks - total_unblocks
+    unique_ips     = int(ips_df[ips_df["action"] == "BLOCK"]["ip"].nunique()) if "ip" in ips_df.columns else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Active Blocks",     active_blocks)
+    c2.metric("Total Blocks",      total_blocks)
+    c3.metric("Total Unblocks",    total_unblocks)
+    c4.metric("Unique IPs Blocked", unique_ips)
+
+    if "ip" in ips_df.columns:
+        st.markdown("**Currently Blocked IPs**")
+        blocked = ips_df[ips_df["action"].isin(["BLOCK", "BLOCK_DRYRUN"])]
+        unblocked_ips = set(ips_df[ips_df["action"].isin(["UNBLOCK", "UNBLOCK_DRYRUN"])]["ip"])
+        active_df = blocked[~blocked["ip"].isin(unblocked_ips)].drop_duplicates("ip")
+        if not active_df.empty:
+            show_cols = [c for c in ["ip", "timestamp", "reason"] if c in active_df.columns]
+            st.dataframe(active_df[show_cols], use_container_width=True, hide_index=True)
+        else:
+            st.write("No active blocks.")
+
+    st.markdown("**Recent IPS Activity (last 20)**")
+    recent = ips_df.sort_values("timestamp", ascending=False).head(20)
+    show_cols = [c for c in ["timestamp", "action", "ip", "reason"] if c in recent.columns]
+    st.dataframe(recent[show_cols], use_container_width=True, hide_index=True)
+
+
+_render_ips_panel()
+
+
 # ─── AUTO-REFRESH ─────────────────────────────────────────────────────────────
 time.sleep(config.REFRESH_INTERVAL)
 st.rerun()
+
+
+def render_ips_panel():
+    """Render the IPS activity panel in the Streamlit dashboard."""
+    import streamlit as st
+    import pandas as pd
+    from pathlib import Path
+    import json
+
+    st.subheader("🛡️ Intrusion Prevention (IPS)")
+
+    audit_path = Path("logs/ips_audit.jsonl")
+    if not audit_path.exists():
+        st.info("IPS audit log not found — run with --ips flag to enable.")
+        return
+
+    # Load all audit records
+    records = []
+    with open(audit_path) as f:
+        for line in f:
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if not records:
+        st.info("No IPS actions yet.")
+        return
+
+    df = pd.DataFrame(records)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # KPI row
+    total_blocks = len(df[df["action"].isin(["BLOCK", "BLOCK_DRYRUN"])])
+    total_unblocks = len(df[df["action"].isin(["UNBLOCK", "UNBLOCK_DRYRUN"])])
+    active_blocks = total_blocks - total_unblocks
+    unique_ips_blocked = df[df["action"] == "BLOCK"]["ip"].nunique()
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Active Blocks", active_blocks)
+    col2.metric("Total Blocks", total_blocks)
+    col3.metric("Total Unblocks", total_unblocks)
+    col4.metric("Unique IPs Blocked", unique_ips_blocked)
+
+    # Currently active blocks
+    st.markdown("**Currently Blocked IPs**")
+    active_df = df[df["action"] == "BLOCK"].groupby("ip").last().reset_index()
+    if not active_df.empty:
+        st.dataframe(active_df[["ip", "timestamp", "reason"]],
+                     use_container_width=True)
+    else:
+        st.write("No active blocks.")
+
+    # Recent audit log entries
+    st.markdown("**Recent IPS Activity (last 20)**")
+    recent = df.sort_values("timestamp", ascending=False).head(20)
+    st.dataframe(recent[["timestamp", "action", "ip", "reason"]],
+                 use_container_width=True)
+

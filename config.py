@@ -136,6 +136,10 @@ DASHBOARD_PORT   = 8501
 ALERT_LOG_FILE   = LOGS_DIR / "alerts.jsonl"
 REFRESH_INTERVAL = 2   # seconds between dashboard refreshes
 
+# ─── IPS (INTRUSION PREVENTION) ───────────────────────────────────────────────
+IPS_AUDIT_LOG    = LOGS_DIR / "ips_audit.jsonl"
+IPS_WHITELIST    = PROJECT_ROOT / "config" / "whitelist.txt"
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 SEPARATOR = "=" * 72
 
@@ -149,3 +153,48 @@ if __name__ == "__main__":
     print(f"Features:      {len(SELECTED_FEATURES)} selected")
     print(f"Classes:       {len(ATTACK_LABELS)} labels")
     print(SEPARATOR)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# IPS (Intrusion Prevention System) Configuration
+# ─────────────────────────────────────────────────────────────────────────
+
+# Master switch — set to False to disable IPS even if --ips flag is passed
+IPS_ENABLED_DEFAULT = False
+
+# Whitelist file path (IPs that are NEVER blocked)
+IPS_WHITELIST_FILE = "config/whitelist.txt"
+
+# Audit log file (every block/unblock is recorded here as JSON)
+IPS_AUDIT_LOG = "logs/ips_audit.jsonl"
+
+# ── Block durations per attack type (seconds) ─────────────────────────────
+IPS_BLOCK_DURATIONS = {
+    "DDoS":          3600,   # 1 hour
+    "DoS":           3600,   # 1 hour
+    "Port Scanning":  1800,  # 30 minutes
+    "Brute Force":   3600,   # 1 hour
+    # Web Attacks and Bots are deliberately NOT in this dict —
+    # their model precision is too low (0.06 and 0.03) to safely auto-block.
+    # They will be LOG_ONLY.
+}
+
+# ── HIGH-severity action per attack type ─────────────────────────────────
+IPS_HIGH_SEVERITY_ACTIONS = {
+    "DDoS":          "BLOCK",
+    "DoS":           "BLOCK",
+    "Port Scanning": "BLOCK",
+    "Brute Force":   "BLOCK",
+    "Web Attacks":   "LOG_ONLY",   # precision = 0.06 — too low to block
+    "Bots":          "LOG_ONLY",   # precision = 0.03 — too low to block
+}
+
+# ── MEDIUM-severity escalation policy ─────────────────────────────────────
+# Block on Nth MEDIUM alert within WINDOW_SEC from the same source
+IPS_ESCALATION_THRESHOLD = 3
+IPS_ESCALATION_WINDOW_SEC = 60
+IPS_ESCALATION_BLOCK_DURATION = 900   # 15 minutes
+
+# ── Unblock daemon ─────────────────────────────────────────────────────────
+# How often the daemon checks for expired blocks (seconds)
+IPS_UNBLOCK_CHECK_INTERVAL = 5
